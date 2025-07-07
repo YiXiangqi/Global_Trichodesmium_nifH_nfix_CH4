@@ -1,0 +1,515 @@
+---
+title: "Tricho_nifH_abundance"
+output: html_document
+date: "2024-11-12"
+---
+
+> -   In this Rmarkdown file, random forest (RF) and multilayer perceptron (MLP) models were built and optimized to predict the global *Trichodesmium* *nifH* gene abundance using `tidymodels` framework.
+> -   It took \~ 30 min to execute this script on our server.
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(raster)
+library(doParallel)
+registerDoParallel()
+```
+
+```{r}
+# See `Dataset_preparation.R` for information of `DS_prepared_for_model_building.RData`
+
+load("data/data_R_exported/DS_prepared_for_model_building.RData") 
+
+# See `Tricho_nifH_existence.Rmd` for information of `rf_Tricho_nifH_existence_prediction.RDS`
+rf_Tricho_nifH_existence_prediction <-
+  read_rds("data/key_model_results/rf_Tricho_nifH_existence_prediction.RDS")
+```
+
+## Training, testing and validation dataset
+
+```{r}
+Tricho_nifH_abundance_data <-
+  DS_for_ML_building_Tricho_nifH %>%
+    filter(Trichodesmium_nifH_integral_regrid > 0) %>%
+    mutate(Log_Trichodesmium_nifH_integral_regrid = log10(Trichodesmium_nifH_integral_regrid*1e6)) %>%
+    dplyr::select(-Trichodesmium_nifH_integral_regrid)
+
+set.seed(27)
+Tricho_nifH_abundance_data_split <- 
+  Tricho_nifH_abundance_data %>% 
+  initial_split(strata = "Log_Trichodesmium_nifH_integral_regrid")
+
+Tricho_nifH_abundance_data_train <-
+  training(Tricho_nifH_abundance_data_split)
+
+Tricho_nifH_abundance_data_test <-
+  testing(Tricho_nifH_abundance_data_split)
+
+set.seed(94)
+Tricho_nifH_abundance_data_folds <- vfold_cv(Tricho_nifH_abundance_data_train, v = 10, repeats = 5)
+
+```
+
+## RF models
+
+### Set up the `workflow` for model building, hyperparameter tuning and prediction
+
+```{r}
+rf_Tricho_nifH_abundance_rec <-
+  recipe(Log_Trichodesmium_nifH_integral_regrid ~ ., data = Tricho_nifH_abundance_data_train) %>%
+  step_log(Chla, DIN, DIP, kd_490, MLD, offset = 0.1 ) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  update_role(lat_regrid, lon_regrid, Sampling_month, new_role = "ID") # original lat, lon and month were not used for the training
+
+rf_Tricho_nifH_abundance_spec <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("ranger")
+
+rf_Tricho_nifH_abundance_wf <- 
+  workflow() %>%
+  add_recipe(rf_Tricho_nifH_abundance_rec) %>%
+  add_model(rf_Tricho_nifH_abundance_spec)
+```
+
+### Tuning hyperparameters
+
+#### Coarse tuning
+
+```{r coarse tune}
+set.seed(453)
+rf_Tricho_nifH_abundance_tune <- tune_grid(
+  rf_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = 100
+)
+autoplot(rf_Tricho_nifH_abundance_tune)
+```
+
+#### Fine tuning
+
+```{r fine tune}
+set.seed(124)
+rf_Tricho_nifH_abundance_tune_grid <- 
+  grid_space_filling(
+    mtry(range = c(1, 14)),
+    trees(range = c(1, 2000)),
+    min_n(range = c(2, 10)),
+    size = 100
+  )
+
+set.seed(14)
+rf_Tricho_nifH_abundance_tune_fine <- tune_grid(
+  rf_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = rf_Tricho_nifH_abundance_tune_grid,
+  control = control_grid(parallel_over = "everything")
+)
+autoplot(rf_Tricho_nifH_abundance_tune_fine)
+```
+
+```{r}
+set.seed(24)
+rf_Tricho_nifH_abundance_tune_grid1 <- 
+  grid_space_filling(
+    mtry(range = c(1, 14)),
+    trees(range = c(10, 2000)),
+    min_n(range = c(2, 10)),
+    size = 100
+  )
+
+set.seed(314)
+rf_Tricho_nifH_abundance_tune_fine1 <- tune_grid(
+  rf_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = rf_Tricho_nifH_abundance_tune_grid1
+)
+autoplot(rf_Tricho_nifH_abundance_tune_fine1)
+```
+
+```{r}
+set.seed(124)
+rf_Tricho_nifH_abundance_tune_grid2 <- 
+  grid_space_filling(
+    mtry(range = c(1, 14)),
+    trees(range = c(50, 2000)),
+    min_n(range = c(2, 10)),
+    size = 100
+  )
+
+set.seed(34)
+rf_Tricho_nifH_abundance_tune_fine2 <- tune_grid(
+  rf_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = rf_Tricho_nifH_abundance_tune_grid2
+)
+autoplot(rf_Tricho_nifH_abundance_tune_fine2)
+```
+
+```{r}
+set.seed(14)
+rf_Tricho_nifH_abundance_tune_grid3 <- 
+  grid_space_filling(
+    mtry(range = c(1, 8)),
+    trees(range = c(50, 2000)),
+    min_n(range = c(2, 10)),
+    size = 100
+  )
+
+set.seed(334)
+rf_Tricho_nifH_abundance_tune_fine3 <- tune_grid(
+  rf_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = rf_Tricho_nifH_abundance_tune_grid3
+)
+autoplot(rf_Tricho_nifH_abundance_tune_fine3)
+```
+
+```{r}
+set.seed(445)
+rf_Tricho_nifH_abundance_tune_grid4 <- 
+  grid_space_filling(
+    mtry(range = c(1, 8)),
+    trees(range = c(50, 2000)),
+    min_n(range = c(2, 6)),
+    size = 100
+  )
+
+set.seed(343)
+rf_Tricho_nifH_abundance_tune_fine4 <- tune_grid(
+  rf_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = rf_Tricho_nifH_abundance_tune_grid4
+)
+autoplot(rf_Tricho_nifH_abundance_tune_fine4)
+```
+
+```{r}
+set.seed(453)
+rf_Tricho_nifH_abundance_tune_grid5 <- 
+  grid_space_filling(
+    mtry(range = c(2, 8)),
+    trees(range = c(100, 2000)),
+    min_n(range = c(2, 6)),
+    size = 100
+  )
+
+set.seed(452)
+rf_Tricho_nifH_abundance_tune_fine5 <- tune_grid(
+  rf_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = rf_Tricho_nifH_abundance_tune_grid5
+)
+autoplot(rf_Tricho_nifH_abundance_tune_fine5)
+```
+
+### Selecting the best RF model
+
+```{r}
+final_rf_Tricho_nifH_abundance_wf <- 
+  rf_Tricho_nifH_abundance_wf %>%
+  finalize_workflow(select_best(rf_Tricho_nifH_abundance_tune_fine5, metric = "rmse"))
+
+set.seed(41)
+rf_Tricho_nifH_abundance_last_fit <-
+  last_fit(final_rf_Tricho_nifH_abundance_wf, Tricho_nifH_abundance_data_split)
+
+# performance on testing dataset 
+collect_metrics(rf_Tricho_nifH_abundance_last_fit)
+
+```
+
+```{r}
+# figures of predicted vs. observed
+fig_rf_test_performance <-
+collect_predictions(rf_Tricho_nifH_abundance_last_fit) %>%
+  ggplot(aes(Log_Trichodesmium_nifH_integral_regrid, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "midnightblue") +
+  coord_fixed() +
+  ylab("Predicted *nifH* abundance (log10 copies m<sup>-2</sup>)") +
+  xlab("Observed *nifH* abundance (log10 copies m<sup>-2</sup>)") +
+  #annotate("text", x = 6.5, y = 12, label = "b") +
+  annotate("text", x = 8, y = 11.5, label = "Random Forest model", family = "serif", size = 6) +
+  scale_x_continuous(limits = c(6, 12)) +
+  scale_y_continuous(limits = c(6, 12)) +
+  theme_light() +
+  theme(axis.title.x = element_markdown(size = 14, family = "serif"),
+        #axis.title.y = element_markdown(size = 16, family = "serif"),
+        axis.title.y = element_blank(),
+        axis.text = element_text(size = 14, family = "serif"),
+        )
+#ggsave("figures/RF_test_performance.jpg",dpi = 600, width = 8, height = 5)
+```
+
+### write key results to disk
+
+```{r}
+# write_rds(final_rf_Tricho_nifH_abundance_wf, file = "data/key_model_results/final_rf_Tricho_nifH_abundance_wf.RDS")
+# 
+# write_rds(rf_Tricho_nifH_abundance_last_fit, file = "data/key_model_results/rf_Tricho_nifH_abundance_last_fit.RDS")
+```
+
+## mlp models
+
+### Set up the `workflow` for model building, hyperparameter tuning and prediction
+
+```{r}
+mlp_Tricho_nifH_abundance_spec <- 
+# Three hyperparameters were tuned: 
+# 1. epochs: Epochs 
+# 2. hidden_units: number of hidden units 
+# 3. penalty: Amount of Regularization  
+  mlp(epochs = tune(), 
+      hidden_units = tune(),  
+      penalty = tune()
+      ) %>%
+  set_mode("regression") %>% 
+  set_engine("nnet") 
+
+mlp_Tricho_nifH_abundance_rec <-
+  recipe(Log_Trichodesmium_nifH_integral_regrid ~ ., data = Tricho_nifH_abundance_data_train) %>%
+  step_log(Chla, DIN, DIP, kd_490, MLD, offset = 0.1 ) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  update_role(lat_regrid, lon_regrid, Sampling_month, new_role = "ID")  
+
+mlp_Tricho_nifH_abundance_wf <- 
+  workflow() %>%
+  add_recipe(mlp_Tricho_nifH_abundance_rec) %>%
+  add_model(mlp_Tricho_nifH_abundance_spec)
+```
+
+### Tuning hyperparameters
+
+#### Coarse tuning
+
+```{r}
+set.seed(342)
+mlp_Tricho_nifH_abundance_tuned <- tune_grid(
+  mlp_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = 100
+)
+autoplot(mlp_Tricho_nifH_abundance_tuned) 
+```
+
+#### Fine tuning
+
+```{r}
+set.seed(431)
+mlp_Tricho_nifH_abundance_grid_fine <- 
+  grid_space_filling(
+    epochs(range = c(10, 1000)),
+    hidden_units(range = c(1, 10)), 
+    penalty(range = c(-2.5, 0)),
+    size = 100
+  )
+
+set.seed(789)
+mlp_Tricho_nifH_abundance_tuned_fine <- tune_grid(
+  mlp_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = mlp_Tricho_nifH_abundance_grid_fine
+)
+autoplot(mlp_Tricho_nifH_abundance_tuned_fine)
+```
+
+```{r}
+set.seed(177)
+mlp_Tricho_nifH_abundance_grid_fine1 <- 
+  grid_space_filling(
+    epochs(range = c(10, 1000)),
+    hidden_units(range = c(3, 15)), 
+    penalty(range = c(-2.5, 0)),
+    size = 100
+  )
+
+set.seed(89)
+mlp_Tricho_nifH_abundance_tuned_fine1 <- tune_grid(
+  mlp_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = mlp_Tricho_nifH_abundance_grid_fine1
+)
+autoplot(mlp_Tricho_nifH_abundance_tuned_fine1)
+```
+
+```{r}
+set.seed(177)
+mlp_Tricho_nifH_abundance_grid_fine2 <- 
+  grid_space_filling(
+    epochs(range = c(10, 1000)), #epochs(range = c(300, 500)),
+    hidden_units(range = c(3, 15)), # set tune parameters range based on last tune result.
+    penalty(range = c(-1.5, 0)),
+    size = 100
+  )
+
+set.seed(89)
+mlp_Tricho_nifH_abundance_tuned_fine2 <- tune_grid(
+  mlp_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = mlp_Tricho_nifH_abundance_grid_fine2
+)
+autoplot(mlp_Tricho_nifH_abundance_tuned_fine2)
+```
+
+```{r}
+set.seed(79)
+mlp_Tricho_nifH_abundance_grid_fine3 <- 
+  grid_space_filling(
+    epochs(range = c(100, 1000)),
+    hidden_units(range = c(3, 15)), # set tune parameters range based on last tune result.
+    penalty(range = c(-1.5, 0)),
+    size = 100
+  )
+
+set.seed(9)
+mlp_Tricho_nifH_abundance_tuned_fine3 <- tune_grid(
+  mlp_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = mlp_Tricho_nifH_abundance_grid_fine3
+)
+
+autoplot(mlp_Tricho_nifH_abundance_tuned_fine3)
+```
+
+```{r}
+set.seed(791)
+mlp_Tricho_nifH_abundance_grid_fine4 <- 
+  grid_space_filling(
+    epochs(range = c(100, 1000)),
+    hidden_units(range = c(3, 15)), # set tune parameters range based on last tune result.
+    penalty(range = c(-0.8, 0)),
+    size = 100
+  )
+
+set.seed(93)
+mlp_Tricho_nifH_abundance_tuned_fine4 <- tune_grid(
+  mlp_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = mlp_Tricho_nifH_abundance_grid_fine4
+)
+
+autoplot(mlp_Tricho_nifH_abundance_tuned_fine4)
+```
+
+```{r}
+set.seed(71)
+mlp_Tricho_nifH_abundance_grid_fine5 <- 
+  grid_space_filling(
+    epochs(range = c(100, 1000)),
+    hidden_units(range = c(9, 20)), # set tune parameters range based on last tune result.
+    penalty(range = c(-0.8, 0)),
+    size = 100
+  )
+
+set.seed(33)
+mlp_Tricho_nifH_abundance_tuned_fine5 <- tune_grid(
+  mlp_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = mlp_Tricho_nifH_abundance_grid_fine5
+)
+
+autoplot(mlp_Tricho_nifH_abundance_tuned_fine5)
+```
+
+```{r}
+set.seed(91)
+mlp_Tricho_nifH_abundance_grid_fine5 <- 
+  grid_space_filling(
+    epochs(range = c(100, 1000)),
+    hidden_units(range = c(9, 20)), # set tune parameters range based on last tune result.
+    penalty(range = c(-0.5, 0)),
+    size = 100
+  )
+
+set.seed(923)
+mlp_Tricho_nifH_abundance_tuned_fine5 <- tune_grid(
+  mlp_Tricho_nifH_abundance_wf,
+  resamples = Tricho_nifH_abundance_data_folds,
+  grid = mlp_Tricho_nifH_abundance_grid_fine5
+)
+
+autoplot(mlp_Tricho_nifH_abundance_tuned_fine5)
+```
+
+### Selecting the best MLP model
+
+```{r}
+final_mlp_Tricho_nifH_abundance_wf <- 
+  mlp_Tricho_nifH_abundance_wf %>%
+  finalize_workflow(select_best(mlp_Tricho_nifH_abundance_tuned_fine5, metric = "rmse"))
+
+set.seed(76)
+mlp_Tricho_nifH_abundance_last_fit <-
+  last_fit(final_mlp_Tricho_nifH_abundance_wf, Tricho_nifH_abundance_data_split)
+collect_metrics(mlp_Tricho_nifH_abundance_last_fit)
+
+# performance on testing dataset
+collect_metrics(rf_Tricho_nifH_abundance_last_fit)
+```
+
+```{r}
+# figure of predicted vs. observed
+fig_mlp_test_performance <-
+collect_predictions(mlp_Tricho_nifH_abundance_last_fit) %>%
+  ggplot(aes(Log_Trichodesmium_nifH_integral_regrid, .pred)) +
+  geom_abline(lty = 2, color = "gray50") +
+  geom_point(alpha = 0.5, color = "midnightblue") +
+  coord_fixed() +
+  ylab("Predicted *nifH* abundance (log10 copies m<sup>-2</sup>)") +
+  xlab("Observed *nifH* abundance (log10 copies m<sup>-2</sup>)") +
+  #annotate("text", x = 6.5, y = 12, label = "a") +
+  annotate("text", x = 7, y = 11.5, label = "MLP model", family = "serif", size = 6) +
+  scale_x_continuous(limits = c(6, 12)) +
+  scale_y_continuous(limits = c(6, 12)) +
+  theme_light() +
+  theme(#axis.title.x = element_markdown(family = "serif", size = 16),
+        #axis.title.y = element_markdown(family = "serif", size = 16),
+        axis.title = element_blank(),
+        axis.text = element_text(family = "serif", size = 14))
+#ggsave("figures/MLP_test_performance.jpg",dpi = 600, width = 8, height = 5)
+```
+
+### write key results to disk
+
+```{r}
+# write_rds(final_mlp_Tricho_nifH_abundance_wf, file = "data/key_model_results/final_mlp_Tricho_nifH_abundance_wf.RDS")
+# 
+# write_rds(mlp_Tricho_nifH_abundance_last_fit, file = "data/key_model_results/mlp_Tricho_nifH_abundance_last_fit.RDS")
+```
+
+## Comparing the performance of MLP and RF models on testing dataset
+
+```{r}
+collect_predictions(mlp_Tricho_nifH_abundance_last_fit) %>%
+  mutate(model = "mlp") %>%
+  bind_rows(collect_predictions(rf_Tricho_nifH_abundance_last_fit) %>% mutate(model = "rf")) #%>%
+  #write_rds("data/model_test_performance.RDS")
+```
+
+```{r}
+library(patchwork)
+fig_test_performance <-
+  fig_mlp_test_performance/fig_rf_test_performance 
+fig_test_performance <-
+  fig_test_performance + 
+    plot_annotation(tag_levels = "a")& 
+    theme(plot.tag = element_text(size = 20, face = "bold",family = "serif"),
+          plot.tag.position = c(0.01, 1.02),
+          )
+
+#fig_test_performance <-
+  wrap_elements(panel = fig_test_performance) +
+    labs(tag = "Predicted *nifH* abundance (log10 copies m<sup>-2</sup>)") +
+    theme(plot.tag = element_markdown(size = 16, family = "serif", angle = 90),
+          plot.tag.position = c(0.25, 0.5))
+
+
+# ggsave("figures/fig_test_performance.pdf",fig_test_performance, dpi = 600, units = "in", width = 7*1.4, height = 7*1.3)
+```
+
+> MLP model was selected for further analysis\
+> 1. According to RMSE and R<sup>2</sup>, the performance of MLP and RF models were similar.\
+> 2. As shown in `fig_test_performance`, RF model tends to overpredict nifH abudance at the low end, and underestimate at the high end.

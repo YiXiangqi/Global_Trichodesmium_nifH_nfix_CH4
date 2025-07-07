@@ -1,0 +1,193 @@
+---
+title: "Tricho_nifH_existence"
+output: html_document
+date: "2024-11-12"
+---
+
+> -   In this Rmarkdown file, random forest (RF) models built and optimized to predict the global *Trichodesmium* distribution (presence-absence) using `tidymodels`.
+> -   It took \~ 15 min to execute this script on our server.
+
+> `tidymodels` tutorials:\
+> - [Julia Silge's blog](https://juliasilge.com/blog/sf-trees-random-tuning/)\
+> - [Tidy Modeling with R](https://www.tmwr.org)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(doParallel)
+registerDoParallel() #  On our server, 80 cores were used
+# getDoParWorkers() # check how many cores are being used for parallel processing
+```
+
+```{r}
+load("data/data_R_exported/DS_prepared_for_model_building.RData") 
+
+# See `Dataset_preparation.R` for information of `DS_prepared_for_model_building.RData`
+```
+
+## Training, testing and validation dataset
+
+```{r data prep}
+set.seed(4)
+Tricho_nifH_existence_data_split <- 
+  DS_for_ML_building_Tricho_nifH_existence %>%
+  drop_na() %>%
+  mutate(Trichodesmium_nifH_existence_regrid = if_else(Trichodesmium_nifH_existence_regrid, "yes", "no")) %>%
+  mutate(Trichodesmium_nifH_existence_regrid = factor(Trichodesmium_nifH_existence_regrid)) %>%
+  initial_split(strata = "Trichodesmium_nifH_existence_regrid")
+
+Tricho_nifH_existence_data_train <-
+  training(Tricho_nifH_existence_data_split)
+
+Tricho_nifH_existence_data_test <-
+  testing(Tricho_nifH_existence_data_split)
+
+set.seed(234)
+Tricho_nifH_existence_data_folds <- vfold_cv(Tricho_nifH_existence_data_train, v = 10, repeats = 5)
+
+```
+
+## Set up the `workflow` for model building, hyperparameter tuning and prediction.
+
+```{r workflow set up}
+rf_Tricho_nifH_existence_rec <-
+  recipe(Trichodesmium_nifH_existence_regrid ~ ., data = Tricho_nifH_existence_data_train) %>%
+  update_role(lat_regrid, lon_regrid, Sampling_month, new_role = "ID")
+
+# Three hyperparameters were tuned: 
+# 1. mtry: Randomly Selected Predictors
+# 2. trees: number of Trees
+# 3. min_n: Minimal Node Size
+rf_Tricho_nifH_existence_spec <-
+  rand_forest(
+    mtry = tune(),
+    trees = tune(),
+    min_n = tune()
+  ) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+rf_Tricho_nifH_existence_wf <-
+  workflow() %>%
+  add_recipe(rf_Tricho_nifH_existence_rec) %>%
+  add_model(rf_Tricho_nifH_existence_spec)
+```
+
+## Tuning hyperparameters
+
+### coarse tuning
+
+```{r coarse tune in 40 seconds}
+set.seed(345)
+rf_Tricho_nifH_existence_tune <- tune_grid(
+  rf_Tricho_nifH_existence_wf,
+  resamples = Tricho_nifH_existence_data_folds,
+  grid = 50
+)
+autoplot(rf_Tricho_nifH_existence_tune)
+```
+
+### fine tuning
+
+```{r fine tune in ~ 90 seconds}
+#based on the results of the last chunk,  hyperparameters
+# were further tuned.
+set.seed(12)
+rf_Tricho_nifH_tune_grid <- 
+  grid_space_filling(
+    mtry(range = c(2, 14)),
+    trees(range = c(50, 2000)),
+    min_n(range = c(2, 20)),
+    size = 100
+  )
+
+set.seed(14)
+rf_Tricho_nifH_tune_fine <- tune_grid(
+  rf_Tricho_nifH_existence_wf,
+  resamples = Tricho_nifH_existence_data_folds,
+  grid = rf_Tricho_nifH_tune_grid
+)
+autoplot(rf_Tricho_nifH_tune_fine)
+```
+
+```{r fine tune 1 in 60 s}
+set.seed(124)
+rf_Tricho_nifH_tune_grid1 <- 
+  grid_space_filling(
+    mtry(range = c(2, 10)),
+    trees(range = c(50, 2000)),
+    min_n(range = c(2, 10)),
+    size = 100
+  )
+
+#a <- Sys.time()
+set.seed(124)
+rf_Tricho_nifH_tune_fine1 <- tune_grid(
+  rf_Tricho_nifH_existence_wf,
+  resamples = Tricho_nifH_existence_data_folds,
+  grid = rf_Tricho_nifH_tune_grid1
+)
+#b <- Sys.time()
+autoplot(rf_Tricho_nifH_tune_fine1)
+```
+
+```{r fine tune 2 in 180 s}
+set.seed(1224)
+rf_Tricho_nifH_tune_grid2 <- 
+  grid_space_filling(
+    mtry(range = c(2, 6)),
+    trees(range = c(50, 2000)),
+    min_n(range = c(2, 7)),
+    size = 300
+  )
+
+a <- Sys.time()
+set.seed(13424)
+rf_Tricho_nifH_tune_fine2 <- tune_grid(
+  rf_Tricho_nifH_existence_wf,
+  resamples = Tricho_nifH_existence_data_folds,
+  grid = rf_Tricho_nifH_tune_grid2
+)
+b <- Sys.time()
+autoplot(rf_Tricho_nifH_tune_fine2)
+```
+
+## Selecting the best RF model
+
+```{r select best rf model}
+# select the best RF model
+final_rf_Tricho_nifH_existence_wf <- 
+  rf_Tricho_nifH_existence_wf %>%
+  finalize_workflow(select_best(rf_Tricho_nifH_tune_fine2, metric = "roc_auc"))
+
+# performance on testing dataset
+set.seed(22)
+rf_existence_last_fit <-
+  last_fit(final_rf_Tricho_nifH_existence_wf, Tricho_nifH_existence_data_split)
+collect_metrics(rf_existence_last_fit)
+```
+
+## Global prediciton of *Tricho* distribution
+
+```{r Tricho nifH existence prediction}
+set.seed(13424)
+rf_Tricho_nifH_existence_prediction <-  
+  predict(rf_existence_last_fit$.workflow[[1]], Predictors_for_model_prediction)
+```
+
+## write key results to disk
+
+`final_rf_Tricho_nifH_existence_wf.RDS`, `rf_existence_last_fit.RDS` and `rf_Tricho_nifH_existence_prediction.RDS` were uploaded.
+
+```{r}
+# write_rds(final_rf_Tricho_nifH_existence_wf,
+#   file = "data/key_model_results/final_rf_Tricho_nifH_existence_wf.RDS")
+# write_rds(rf_existence_last_fit,
+#   file = "data/key_model_results/rf_existence_last_fit.RDS")
+# write_rds(rf_Tricho_nifH_existence_prediction,
+#   file = "data/key_model_results/rf_Tricho_nifH_existence_prediction.RDS")
+```

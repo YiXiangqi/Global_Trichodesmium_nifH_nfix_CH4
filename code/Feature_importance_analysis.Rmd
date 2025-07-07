@@ -1,0 +1,45 @@
+---
+title: "Feature_importance_analysis"
+output: html_document
+date: "2024-11-30"
+---
+
+
+```{r}
+library(vip)
+
+imp_spec <- ranger_spec %>%
+  finalize_model(select_best(ranger_tune)) %>%
+  set_engine("ranger", importance = "permutation")
+
+workflow() %>%
+  add_recipe(ranger_recipe) %>%
+  add_model(imp_spec) %>%
+  fit(ikea_train) %>%
+  pull_workflow_fit() %>%
+  vip(aesthetics = list(alpha = 0.8, fill = "midnightblue"))
+```
+
+```{r}
+rf_existence_vip_spec <-
+  rf_Tricho_nifH_existence_spec %>%
+  finalize_model(select_best(rf_Tricho_nifH_tune_fine2, metric = "roc_auc")) %>%
+  set_engine("ranger", importance = "permutation")
+
+workflow() %>%
+  add_recipe(rf_Tricho_nifH_existence_rec) %>%
+  add_model(rf_existence_vip_spec) %>%
+  fit(Tricho_nifH_existence_data_train) %>%
+  extract_fit_parsnip() %>%
+  vip(aesthetics = list(alpha = 0.8, fill = "midnightblue"))
+```
+
+```{r}
+workflow() %>%
+  add_recipe(rf_Tricho_nifH_existence_rec) %>%
+  add_model(rf_existence_vip_spec) %>%
+  fit(Tricho_nifH_existence_data_train) %>%
+  extract_fit_parsnip() %>%
+  vi()
+```
+

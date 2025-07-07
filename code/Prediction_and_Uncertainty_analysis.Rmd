@@ -1,0 +1,703 @@
+---
+title: "Prediction and Uncertainty analysis"
+output: html_document
+date: "2024-11-28"
+---
+
+```{r}
+library(tidyverse)
+library(doParallel)
+library(ggtext)
+library(mgcv)
+library(tidymodels)
+```
+
+```{r}
+load("data/data_R_exported/DS_prepared_for_model_building.RData")
+final_mlp_Tricho_nifH_abundance_wf <- 
+  readRDS("data/key_model_results/final_mlp_Tricho_nifH_abundance_wf.RDS")
+```
+
+- uncertainty 1: MLP model randomness 
+- uncertainty 2: light and temperature effects on Q<sub>NCH4</sub> 
+- uncertainty 3: MPn to DOP percent 
+
+## Predictiion considering uncertainty caused by mlp randomness
+
+### nifH abundance prediction
+
+```{r nifH abundance prediciton pool}
+registerDoParallel()
+# this step: about 1 min
+mlp_Tricho_nifH_abundance_model_pool <-
+  foreach(i = 1:1000) %dopar% {
+    set.seed(i) 
+    fit(final_mlp_Tricho_nifH_abundance_wf, Tricho_nifH_abundance_data) # Tricho_nifH_abundance_data is from Tricho_nifH_abundance.Rmd
+  } 
+# nifH prediction, masking land and grids predicted as "no" in rf_Tricho_nifH_existence_prediction.
+
+# landsea_01.msk was downloaded from 
+# https://www.ncei.noaa.gov/data/oceans/woa/WOA18/MASKS/landsea_01.msk
+mask_land <- 
+  read_delim("data/landsea_01.msk", delim = ",", skip = 1) %>%
+  arrange(Longitude, Latitude) %>%
+  mutate(isLand = Bottom_Standard_Level == 1) %>%
+  `[[`("isLand") %>% # True for land, False for sea
+  rep(times = 12)
+
+rf_Tricho_nifH_existence_prediction <- 
+  readRDS("data/key_model_results/rf_Tricho_nifH_existence_prediction.RDS")
+
+mask_Tricho_existence <- # True for no Tricho, False for Tricho existence
+  rf_Tricho_nifH_existence_prediction$.pred_class == "no"
+
+mask <- mask_land | mask_Tricho_existence # True for no Tricho or Land
+
+# this step: about 2 min
+
+mlp_Tricho_nifH_abundance_prediction_pool <-
+  foreach(i = 1:1000) %dopar% {
+    predict(mlp_Tricho_nifH_abundance_model_pool[[i]], Predictors_for_model_prediction) %>%
+      mutate(nifH_abundance_masked = if_else(mask, NA, .pred)) %>%
+      dplyr::select(nifH_abundance_masked)
+  }
+
+# mlp_Tricho_nifH_abundance_prediction_pool <- 
+#   read_rds("data/key_model_results/mlp_Tricho_nifH_abundance_prediction_pool.RDS")
+
+# write_rds(mlp_Tricho_nifH_abundance_prediction_pool, "data/key_model_results/mlp_Tricho_nifH_abundance_prediction_pool.RDS")
+```
+
+### nifH abundance prediction: yearly average
+
+```{r}
+mask_yearly <- mask %>%
+  matrix(ncol = 12, nrow = 180*360) %>%# True for no Tricho or Land
+  apply(1, all)
+
+mask_yearly[37380] <- T # existence model predict Yes at month 9, also "sea" in mask_land, but Predictors_for_model_prediction line 180*360*8+37380 contains NA 
+
+# time 1 min
+mlp_Tricho_nifH_abundance_prediction_yearly_average_pool <-
+  foreach(i = 1:1000) %dopar% {
+    nifH_abundance_yearly_average_i <-
+    mlp_Tricho_nifH_abundance_prediction_pool[[i]] %>%
+      `[[`("nifH_abundance_masked") %>%
+      matrix(ncol = 12, nrow = 180*360) %>%
+      {`^`(10, .)} %>%
+      rowSums(na.rm = T) 
+    nifH_abundance_yearly_average_i[mask_yearly] <- NA
+    log10(nifH_abundance_yearly_average_i/12)
+  }
+
+# mlp_Tricho_nifH_abundance_prediction_yearly_average_pool <-
+#   read_rds("data/key_model_results/mlp_Tricho_nifH_abundance_prediction_yearly_average_pool.RDS")
+
+# write_rds(mlp_Tricho_nifH_abundance_prediction_yearly_average_pool, "data/key_model_results/mlp_Tricho_nifH_abundance_prediction_yearly_average_pool.RDS")
+```
+
+```{r nifH abundance prediciton summary}
+mlp_Tricho_nifH_abundance_prediction_yearly_average_mean <-
+  mlp_Tricho_nifH_abundance_prediction_yearly_average_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, mean)
+#summary(mlp_Tricho_nifH_abundance_prediction_yearly_average_mean)
+
+mlp_Tricho_nifH_abundance_prediction_yearly_average_median <-
+  mlp_Tricho_nifH_abundance_prediction_yearly_average_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, median)
+
+mlp_Tricho_nifH_abundance_prediction_yearly_average_sd <-
+  mlp_Tricho_nifH_abundance_prediction_yearly_average_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, sd)
+#summary(mlp_Tricho_nifH_abundance_prediction_yearly_average_sd)
+
+mlp_Tricho_nifH_abundance_prediction_yearly_average_CI_upper <-
+  mlp_Tricho_nifH_abundance_prediction_yearly_average_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, quantile, probs = 0.975, na.rm = T)
+
+mlp_Tricho_nifH_abundance_prediction_yearly_average_CI_lower <-
+  mlp_Tricho_nifH_abundance_prediction_yearly_average_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, quantile, probs = 0.025, na.rm = T)
+
+mlp_Tricho_nifH_abundance_prediction_yearly_average_summary <-
+  data.frame(mean = mlp_Tricho_nifH_abundance_prediction_yearly_average_mean,
+             median = mlp_Tricho_nifH_abundance_prediction_yearly_average_median,
+             sd = mlp_Tricho_nifH_abundance_prediction_yearly_average_sd,
+             CI_upper = mlp_Tricho_nifH_abundance_prediction_yearly_average_CI_upper,
+             CI_lower = mlp_Tricho_nifH_abundance_prediction_yearly_average_CI_lower)
+```
+
+```{r}
+## For Matlab plots
+# write_csv(mlp_Tricho_nifH_abundance_prediction_yearly_average_summary, "Matlab_plots/mlp_Tricho_nifH_abundance_prediction_yearly_average_summary.csv")
+
+# Tricho_nifH_abundance_data_train %>%
+#   mutate(data_type = "train") %>%
+#   bind_rows(Tricho_nifH_abundance_data_test %>%
+#               mutate(data_type = "test")) %>% # for figure 
+#   select(lat_regrid, lon_regrid, Log_Trichodesmium_nifH_integral_regrid, data_type) %>%
+#   write_csv("Matlab_plots/Tricho_nifH_abundance_data.csv")
+
+```
+
+### Tricho nfix
+
+```{r Tricho nfix prediction pool}
+Calc_Nfix_from_nifH_abundance <- function(nifH_abundance, nifH_per_cell = 10, Nfix_per_cell = 100){
+  #nifH in log10(), copies m^-2; nifH_per_cell, nifH copies per cell; Nfix_per_cell, cellular Nfix rate in fmol cell^-2 day^-1
+  #return Nfix in umol m^-2 day^-1
+  data.frame(nfix = 10^(nifH_abundance$nifH_abundance_masked)/nifH_per_cell*Nfix_per_cell*1e-9)
+}
+
+mlp_Tricho_nfix_prediction_pool <- # Nfix in umol m^-2 day^-1
+  mlp_Tricho_nifH_abundance_prediction_pool %>%
+  map(Calc_Nfix_from_nifH_abundance)
+
+```
+
+```{r}
+Days_mat <-
+  rep(c(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31), each = 360*180) %>%
+  matrix(ncol = 12)
+
+# 1 min
+mlp_Tricho_nfix_prediction_yearly_pool <-
+  foreach(i = 1:1000) %dopar% {
+    mlp_Tricho_nfix_prediction_yearly_i <-
+      mlp_Tricho_nfix_prediction_pool[[i]] %>%
+        `[[`("nfix") %>%
+        matrix(ncol = 12) %>%
+        `*`(Days_mat) %>%
+        rowSums(na.rm = T) # rowSums function return 0 for all NA rows
+    mlp_Tricho_nfix_prediction_yearly_i[mask_yearly] <- NA
+    mlp_Tricho_nfix_prediction_yearly_i/1000
+  }
+
+# mlp_Tricho_nfix_prediction_yearly_pool <-
+#   read_rds("data/key_model_results/mlp_Tricho_nfix_prediction_yearly_pool.RDS")
+# write_rds(mlp_Tricho_nfix_prediction_yearly_pool, "data/key_model_results/mlp_Tricho_nfix_prediction_yearly_pool.RDS")
+
+```
+
+```{r mlp_Tricho_nfix_prediction_yearly summary}
+mlp_Tricho_nfix_prediction_yearly_mean <-
+  mlp_Tricho_nfix_prediction_yearly_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, mean)
+
+#mlp_Tricho_nfix_prediction_yearly_mean %>% summary()
+
+mlp_Tricho_nfix_prediction_yearly_median <-
+  mlp_Tricho_nfix_prediction_yearly_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, median)
+
+mlp_Tricho_nfix_prediction_yearly_sd <-
+  mlp_Tricho_nfix_prediction_yearly_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, sd)
+
+mlp_Tricho_nfix_prediction_yearly_CI_upper <-
+  mlp_Tricho_nfix_prediction_yearly_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, quantile, probs = 0.975, na.rm = T)
+
+mlp_Tricho_nfix_prediction_yearly_CI_lower <-
+  mlp_Tricho_nfix_prediction_yearly_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, quantile, probs = 0.025, na.rm = T)
+
+mlp_Tricho_nfix_prediction_yearly_summary <-
+  data.frame(mean = mlp_Tricho_nfix_prediction_yearly_mean,
+             median = mlp_Tricho_nfix_prediction_yearly_median,
+             sd = mlp_Tricho_nfix_prediction_yearly_sd,
+             CI_upper = mlp_Tricho_nfix_prediction_yearly_CI_upper,
+             CI_lower = mlp_Tricho_nfix_prediction_yearly_CI_lower)
+```
+
+```{r}
+# write_csv(mlp_Tricho_nfix_prediction_yearly_summary, "Matlab_plots/mlp_Tricho_nfix_prediction_yearly_summary.csv")
+```
+
+### Total N fixation
+
+```{r Total N fixation}
+#mlp_Tricho_nfix_prediction_pool[[1]]
+#mlp_Tricho_nfix_prediction_yearly_pool[[1]] # Nfix in mmol m^-2 year^-1
+library(raster)
+grid_cell_raster <- raster()
+area_raster <- area(grid_cell_raster) * 1000*1000
+area_matrix <- as.matrix(area_raster)
+#area_array <- array(rep(area_matrix[], times = 12), dim = c(180, 360, 12))
+
+# Days_array <-
+#   rep(c(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31), each = 360*180) %>%
+#   array(dim = c(180, 360, 12))
+
+Calc_Total_nfix_yearly <- function(mlp_Tricho_nfix_prediction_yearly){
+  mlp_Tricho_nfix_prediction_yearly %>% # mmol m^-2 year^-1 
+  matrix(ncol = 360, nrow = 180) %>% 
+  `*`(area_matrix) %>% #mmol grid^-2 year^-1
+  `*`(1e-3*14*1e-12)  %>% # mmol -> mol -> g -> Tg
+  sum(na.rm = T)  # Tg year-1 
+}
+mlp_Tricho_Total_nifx_pool <- # Tg N year-1
+  mlp_Tricho_nfix_prediction_yearly_pool %>%
+    map_vec(Calc_Total_nfix_yearly)
+summary(mlp_Tricho_Total_nifx_pool)
+quantile(mlp_Tricho_Total_nifx_pool, probs = c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))
+```
+
+### CH4 production
+
+#### SRP, DOP and SRP/TDP
+
+```{r}
+# According to Martiny et al. (2019, Science Advnces), WOA climatoloy overestimates surface DIP more than GLODAP 
+# In GLODAP climatoloy dataset, several areas were maked by the authors because of poor data quality. We supplemented it with WOA 2023.
+
+SRP_Glodap_plus_WOA23 <-
+  read_csv("data/SRP_Glodap_plus_WOA23.csv", col_names = "SRP") %>%
+  `[[`("SRP")
+
+# surface DOP data was derived from Liang et al.(2022, Nature geoscience)
+
+DOP_surface_Liang_model <- 
+  read_csv("data/DOP_surface.csv", col_names = "DOP") %>%
+  `[[`("DOP") 
+  
+DOP_to_TDP <- DOP_surface_Liang_model/(SRP_Glodap_plus_WOA23+DOP_surface_Liang_model)
+
+MPn_to_DOP <- 0.08
+
+```
+
+### CH4 production
+
+```{r}
+# NCH4_pool.csv contained the ratio of nitrogen fixation to CH4 production under different light and temperature.
+# Exp1: current study.
+# Exp2: our previous work Zou et al., 2024
+
+NCH4_pool <-
+  read_csv("data/NCH4_pool.csv", show_col_types = FALSE)
+NCH4_pool %>%
+  filter(Experiment == "Exp1",
+         Light != 30) %>%
+  summarise(mean = mean(NCH4_ratio, na.rm = T))
+NCH4_ratio <- 32.39144
+```
+
+```{r CH4 production pool}
+mlp_Tricho_nfix_prediction_yearly_pool # mmol N m-2 year -1
+
+Cacl_CH4_prod_yearly <- function(mlp_Tricho_nfix_prediction_yearly){
+  mlp_Tricho_nfix_prediction_yearly * DOP_to_TDP * MPn_to_DOP *(1/NCH4_ratio)
+}
+
+# estimate pool of CH4 production,  mmol CH4 m-2 year-1
+Tricho_CH4_prod_yearly_pool <- 
+  mlp_Tricho_nfix_prediction_yearly_pool %>%
+  map(Cacl_CH4_prod_yearly)
+```
+
+```{r CH4 production summary}
+# estimate pool of CH4 production: mean, mmol CH4 m-2 year-1
+# num [1:64800]
+Tricho_CH4_prod_yearly_mean <-
+  Tricho_CH4_prod_yearly_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, mean)
+```
+
+```{r}
+# length(Tricho_CH4_prod_yearly_mean)
+# write_csv(data.frame(CH4_prod = Tricho_CH4_prod_yearly_mean), "Matlab_plots/Tricho_CH4_prod_yearly_mean.csv")
+```
+
+### Total CH4 prod
+
+```{r}
+#mlp_Tricho_nfix_prediction_pool[[1]]
+Tricho_CH4_prod_yearly_pool[[1]] # in mmol m^-2 year^-1
+grid_cell_raster <- raster()
+area_raster <- raster::area(grid_cell_raster) * 1000*1000
+area_matrix <- as.matrix(area_raster)
+
+Calc_Total_CH4_prod_yearly <- function(Tricho_CH4_prod_yearly){
+  Tricho_CH4_prod_yearly %>% # mmol m^-2 year^-1 
+  matrix(ncol = 360, nrow = 180) %>% 
+  `*`(area_matrix) %>% #mmol grid^-2 year^-1
+  `*`(1e-3*16*1e-12)  %>% # mmol -> mol -> g -> Tg
+  sum(na.rm = T)  # Tg year-1 
+}
+
+# estimate pool of total yearly CH4 production # Tg CH4 year-1
+Tricho_Total_CH4_prod_pool <- 
+  Tricho_CH4_prod_yearly_pool %>%
+    map_vec(Calc_Total_CH4_prod_yearly)
+summary(Tricho_Total_CH4_prod_pool)
+quantile(Tricho_Total_CH4_prod_pool, probs = c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))
+```
+
+### contribution to CH4 flux
+
+```{r}
+# Global_CH4_flux.csv was derived from Weber et al.(2019, Nature communications)
+Global_CH4_flux <- 
+  read_csv("data/Global_CH4_flux.csv", col_names = "CH4_flux") %>%
+  `[[`("CH4_flux") 
+Global_CH4_flux[is.na(Tricho_CH4_prod_yearly_pool[[1]])] <- NA
+
+Global_CH4_flux_per_grid <- # mmol CH4 grid-1 year-1
+  Global_CH4_flux %>% # mmol CH4-2 year-1
+  matrix(nrow = 180, ncol = 360) %>%
+  `*`(area_matrix) 
+```
+
+```{r}
+Tricho_CH4_prod_yearly_pool
+
+Calc_Tricho_CH4_contribution <- function(Tricho_CH4_prod_yearly){
+  Tricho_CH4_prod_yearly %>% # mmol m-1 year-1
+    matrix(nrow = 180, ncol = 360) %>%
+  `*`(area_matrix*100) %>% # mmol grid-1 year-1
+  `/`(Global_CH4_flux_per_grid) %>%
+  as.vector()# retrun contribution in percent
+}
+
+## the ratio of Tricho CH4 production to  CH4 flux : pool
+Tricho_CH4_contribution_pool <-
+  Tricho_CH4_prod_yearly_pool %>%
+  map(Calc_Tricho_CH4_contribution)
+
+## the ratio of Tricho CH4 production to  CH4 flux : mean
+Tricho_CH4_contribution_mean <-
+  Tricho_CH4_contribution_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    apply(1, mean)
+
+summary(Tricho_CH4_contribution_mean)
+quantile(Tricho_CH4_contribution_mean, probs = c(0.9025, 0.95, 0.9975), na.rm = T)
+
+```
+
+```{r}
+# 束毛藻甲烷产量占当地甲烷通量的超过10%的网格点比例 集合
+mask_yearly #True for no Tricho or Land 
+Tricho_CH4_contribution_pool
+.x <- Tricho_CH4_contribution_pool[[1]]
+Calc_Tricho_CH4_contribution_10 <- function(.x) {
+  Tricho_yes <- .x[!mask_yearly]
+  mean(Tricho_yes >= 10, na.rm = T)
+}
+
+Tricho_CH4_contribution_10_pool <-
+  map_dbl(Tricho_CH4_contribution_pool, Calc_Tricho_CH4_contribution_10)
+
+summary(Tricho_CH4_contribution_10_pool)
+quantile(Tricho_CH4_contribution_10_pool, probs = c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))
+```
+
+```{r}
+# write_csv(data.frame(Tricho_contri = Tricho_CH4_contribution_mean), "Matlab_plots/Tricho_CH4_contri_yearly_mean.csv")
+```
+
+#### total contribution
+
+```{r}
+Tricho_Total_CH4_prod_pool # Tg year-1
+
+Global_CH4_flux_per_grid[mask_yearly] <- NA # mmol CH4 grid-1 year-1
+Tricho_total_CH4_contribution_pool <- 
+  Tricho_Total_CH4_prod_pool/sum(Global_CH4_flux_per_grid*1e-3*16*1e-12, na.rm = T)*100
+
+summary(Tricho_total_CH4_contribution_pool)
+quantile(Tricho_total_CH4_contribution_pool, probs = c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))
+```
+
+# Uncertainty and senstivity analysis
+
+1.  Light and temperature effect
+2.  MPn to DOP ratio [0.06, 0.1]
+3.  SRP uncertainty (optional) \## Light
+
+```{r}
+#fig_PARmld_histogram <- 
+Predictors_for_model_prediction %>%
+  mutate(kd = 0.0665 + 0.874*kd_490 - 0.00121/kd_490,
+         PAR_mld = PAR/(kd*MLD) * (1 - exp(-(kd*MLD))),
+         Tricho_nifH_existence = rf_Tricho_nifH_existence_prediction$.pred_class) %>%
+  filter(rf_Tricho_nifH_existence_prediction$.pred_class == "yes") %>%
+  select(lat_regrid, lon_regrid, Sampling_month, PAR_mld, MLD, PAR, kd_490) %>%
+  drop_na() %>%
+  #write_rds("data/PARmld_histogram.RDS")
+  #filter(PAR_mld < 5.184)
+  #filter(PAR_mld > 31.968)
+  #summary()
+  ggplot() +
+  geom_histogram(aes(x = PAR_mld), fill = "#69b3a2",color="#e9ecef", alpha=0.9, bins = 30) +
+  annotate("segment", x = 5.184, xend = 5.184, y = 10000, yend = 5000, arrow = arrow(length = unit(0.2, "cm")), linewidth = 0.5, linetype = "dashed") +
+  geom_richtext(aes(x = x, y = y, label = text), data = data.frame(x = 5.184, y = 11000, text = "5.2 Einstein m<sup>-2</sup> day<sup>-1</sup>, corresponding to<br>60 &mu;mol photons m<sup>-2</sup> s<sup>-1</sup> with 12:12 h light/dark cycle"), size =2.5, family = "serif")+
+  annotate("segment", x = 31.968, xend = 31.968, y = 10000, yend = 5000, arrow = arrow(length = unit(0.2, "cm")), linewidth = 0.5, linetype = "dashed") +
+  geom_richtext(aes(x = x, y = y, label = text), data = data.frame(x = 31.968, y = 11000, text = "32.0 Einstein m<sup>-2</sup> day<sup>-1</sup>, corresponding to<br>370 &mu;mol photons m<sup>-2</sup> s<sup>-1</sup> with 12:12 h light/dark cycle"), size =2.5, family = "serif")+
+  scale_x_continuous(breaks = c(0, 10, 20, 30, 40, 50)) +
+  xlab("The average PAR in the mixed layer (Einstein m<sup>-2</sup> day<sup>-1</sup>)") +
+  ylab("Number of data points") +
+  theme_light() +
+  theme(axis.title.x = element_markdown(family = "serif", size = 16),
+        axis.title.y = element_markdown(family = "serif", size = 16),
+        axis.text = element_text(family = "serif", size = 14)
+        )
+```
+
+```{r}
+ggsave("figures/histogram_PAR_mld.jpg",dpi = 600, width = 8, height = 5)
+```
+
+```{r}
+885/132684
+8245/132684
+```
+
+> The light setup in our controlled experiments covers most of light intensities experienced by *Trichodesmium*.
+
+## Temperature
+
+```{r}
+fig_sst_histgram <-
+Predictors_for_model_prediction %>%
+  mutate(Tricho_nifH_existence = rf_Tricho_nifH_existence_prediction$.pred_class) %>%
+  filter(rf_Tricho_nifH_existence_prediction$.pred_class == "yes") %>%
+  select(lat_regrid, lon_regrid, Sampling_month, SST) %>%
+  drop_na() %>%
+  #filter(PAR_mld < 5.184)
+  #filter(PAR_mld > 31.968)
+  #summary() %>%
+  ggplot() +
+  geom_histogram(aes(x = SST), fill = "#69b3a2",color="#e9ecef", alpha=0.9, bins = 40) +
+  scale_x_continuous(breaks = c(16, 20, 23, 27, 31, 35)) +
+  xlab("SST (&deg;C)") +
+  ylab("Number of data points")+
+  theme_light() +
+  theme(axis.title.x = element_markdown(family = "serif", size = 16),
+        axis.title.y = element_markdown(family = "serif", size = 16),
+        axis.text = element_text(family = "serif", size = 14))
+```
+
+```{r}
+ggsave("figures/histogram_SST.jpg",dpi = 600, width = 8, height = 5)
+
+```
+
+```{r}
+Predictors_for_model_prediction %>%
+  mutate(Tricho_nifH_existence = rf_Tricho_nifH_existence_prediction$.pred_class) %>%
+  filter(rf_Tricho_nifH_existence_prediction$.pred_class == "yes") %>%
+  select(lat_regrid, lon_regrid, Sampling_month, SST) %>%
+  drop_na() %>%
+  write_rds("data/sst_histogram.RDS")
+
+fig_PARmld_histogram/fig_sst_histgram
+
+Predictors_for_model_prediction %>%
+  mutate(Tricho_nifH_existence = rf_Tricho_nifH_existence_prediction$.pred_class) %>%
+  filter(rf_Tricho_nifH_existence_prediction$.pred_class == "yes") %>%
+  select(lat_regrid, lon_regrid, Sampling_month, SST) %>%
+  drop_na() %>%
+  filter(SST >= 20,
+         SST<= 27)
+
+58176/132697
+```
+
+### build realationship between temperature and NCH4
+
+```{r}
+NCH4_pool <-
+  read_csv("data/NCH4_pool.csv", show_col_types = FALSE)
+NCH4_pool %>%
+  filter(Light != 30) %>%
+  drop_na() %>%
+  #mutate(NCH4_ratio_pred = predict(NCH4_ratio_temperature_gam)) %>%
+  ggplot() +
+  geom_point(aes(Temperature, NCH4_ratio, color = Data_source))
+```
+
+```{r using GAM}
+NCH4_ratio_temperature_gam <-
+  gam(NCH4_ratio ~ s(Temperature, k = 5), data = NCH4_pool %>% filter(Light != 30) %>% drop_na())
+# NCH4_pool %>%
+#   write_rds("data/NCH4_pool.RDS")
+predict(NCH4_ratio_temperature_gam, se.fit = T, newdata = list(Temperature = seq(from = 16, to = 31, by = 0.1))) %>%
+  #write_rds("data/NCH4_temperature_gam.RDS")
+  as.data.frame() %>%
+  mutate(Temperature = seq(from = 16, to = 31, by = 0.1)) %>%
+  ggplot() + 
+  geom_line(aes(Temperature, fit), linetype= 2) +
+  geom_ribbon(aes(x = Temperature, y = fit, ymin = fit - 1.96*se.fit, ymax = fit + 1.96*se.fit), alpha = 0.5) +
+  geom_point(aes(Temperature, NCH4_ratio, shape = Data_source), size = 3, data = NCH4_pool %>% filter(Light != 30) %>% drop_na(), position = position_jitter(width = 0.1)) +
+  scale_shape_manual(values = c(1, 2))+
+  ylab("Q<sub>N_CH<sub>4</sub></subsub>") +
+  xlab("Tempearture (&deg;C)") +
+  theme_light() +
+  theme(axis.title.x = element_markdown(size = 16, family = "serif"),
+        axis.title.y = element_markdown(size = 16, family = "serif"),
+        axis.text = element_text(size = 14, family = "serif"),
+        legend.text = element_text(size = 12, family = "serif"),
+        legend.position = "inside", 
+        legend.position.inside = c(0.7, 0.9),
+        legend.title = element_blank(),
+        legend.background = element_rect(color = "black", linewidth = 0.2))
+ggsave("figures/QNCH4_temperature.png",dpi = 600, width = 8, height = 5)
+```
+
+### Simulating 1000 sets of NCH4_ratio
+
+reference:<https://mikl.dk/post/2019-prediction-intervals-for-gam/>
+
+```{r}
+gam_beta <- coef(NCH4_ratio_temperature_gam)
+gam_V <- vcov(NCH4_ratio_temperature_gam)
+num_beta_vecs <- 1000
+gam_Cv <- chol(gam_V)
+set.seed(1)
+gam_nus <- rnorm(num_beta_vecs*length(gam_beta))
+gam_beta_sims <-
+  gam_beta + t(gam_Cv) %*% matrix(gam_nus, nrow = length(gam_beta), ncol = num_beta_vecs)
+d_beta <- cbind(summary(NCH4_ratio_temperature_gam)$se, apply(gam_beta_sims, 1, sd))
+Predictors_SST <- Predictors_for_model_prediction %>%
+  select(SST) %>%
+  rename(Temperature = SST)
+covar_sim <- predict(NCH4_ratio_temperature_gam, newdata = Predictors_SST, type = "lpmatrix")
+linpred_sim <- covar_sim %*% gam_beta_sims
+invlink <- function(x) x
+exp_val_sim <- invlink(linpred_sim)
+NCH4_ratio_sim <-
+   matrix(rnorm(n = prod(dim(exp_val_sim)), 
+                mean = exp_val_sim, 
+                sd = sqrt(summary(NCH4_ratio_temperature_gam)$scale)), 
+          nrow = nrow(exp_val_sim), 
+          ncol = ncol(exp_val_sim))
+
+NCH4_ratio_sim[NCH4_ratio_sim <=0 ] <- NA
+dim(NCH4_ratio_sim)
+Predictors_SST %>% dim()
+
+NCH4_ratio_sim[9:23, 3:5]
+```
+
+### Simulating 1000 sets of MPn_to_DOP ratio
+
+```{r}
+set.seed(4)
+MPn_to_DOP_sim <-
+  runif(prod(dim(NCH4_ratio_sim)), min = 0.06, max = 0.1) %>%
+  matrix(ncol = 1000)
+
+DOP_to_TDP_sim <-
+  rep(DOP_to_TDP, times = 12 * 1000) %>%
+  matrix(nrow = 180*360*12, ncol = 1000)
+
+Days_sim <- 
+  rep(c(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31), each = 360*180) %>%
+  rep(times = 1000) %>%
+  matrix(nrow = 180*360*12, ncol = 1000)
+
+dim(MPn_to_DOP_sim)
+dim(DOP_to_TDP_sim)
+dim(Days_sim)
+```
+
+```{r}
+length(mlp_Tricho_nifH_abundance_prediction_pool)
+mlp_Tricho_nifH_abundance_prediction_pool[[1]] %>% str()
+
+Tricho_CH4_prod_yearly_sim_mat <- 
+  mlp_Tricho_nifH_abundance_prediction_pool %>%
+    as.data.frame() %>%
+    as.matrix() %>%
+    {`^`(10, .)} %>% # copies m-2
+    `*`(100/10) %>% # nfix fmol N m-2 day-1
+    `/`(NCH4_ratio_sim) %>%
+    `*`(MPn_to_DOP_sim) %>%
+    `*`(DOP_to_TDP_sim) %>% # CH4 fmol m-2 day-1
+    `*`(Days_sim) %>% #CH4 fmol m-2 month-1
+    array(dim = c(180*360, 12, 1000)) %>%
+    apply(c(1,3), sum, na.rm = T) %>% # CH4 fmol m-2 year-1
+    `*`(1e-12) # CH4 mmol m-2 year-1
+```
+
+```{r}
+dim(Tricho_CH4_prod_yearly_sim_mat)
+
+Tricho_CH4_prod_yearly_sim_mean <- 
+  Tricho_CH4_prod_yearly_sim_mat %>%
+    rowMeans(na.rm = T)
+Tricho_CH4_prod_yearly_sim_mean[mask_yearly] <- NA
+```
+
+```{r}
+# write_csv(data.frame(CH4_prod = Tricho_CH4_prod_yearly_sim_mean),
+#           "Matlab_plots/Tricho_CH4_prod_yearly_sim_mean.csv")
+
+```
+
+```{r}
+Tricho_CH4_contribution_sim_mat <-
+  Tricho_CH4_prod_yearly_sim_mat %>%
+    apply(2, Calc_Tricho_CH4_contribution)
+
+Tricho_CH4_contribution_sim_mean <-
+  Tricho_CH4_contribution_sim_mat %>%
+  apply(1, mean, na.rm = T)
+Tricho_CH4_contribution_sim_mean[mask_yearly] <- NA
+Tricho_CH4_contribution_sim_mean %>% summary()
+
+```
+
+```{r}
+# write_csv(data.frame(CH4_contri = Tricho_CH4_contribution_sim_mean),
+#           "Matlab_plots/Tricho_CH4_contribution_sim_mean.csv")
+
+```
+
+#### Total CH4 prod and contribution simulation
+
+```{r}
+Tricho_Total_CH4_prod_sim_pool <-
+  Tricho_CH4_prod_yearly_sim_mat %>%
+    as.data.frame() %>%
+    map_vec(Calc_Total_CH4_prod_yearly)
+
+
+summary(Tricho_Total_CH4_prod_sim_pool)
+quantile(Tricho_Total_CH4_prod_sim_pool, probs = c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))
+
+```
+
+```{r}
+Global_CH4_flux_per_grid[mask_yearly] <- NA # mmol CH4 grid-1 year-1
+Tricho_total_CH4_contribution_sim_pool <- 
+  Tricho_Total_CH4_prod_sim_pool/sum(Global_CH4_flux_per_grid*1e-3*16*1e-12, na.rm = T)*100
+
+summary(Tricho_total_CH4_contribution_sim_pool)
+quantile(Tricho_total_CH4_contribution_sim_pool, probs = c(0.025, 0.05, 0.1, 0.5, 0.9, 0.95, 0.975))
+```

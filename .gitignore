@@ -1,0 +1,11 @@
+# Ignore directories
+/data/
+
+# Ingore files
+.DS_Store
+/Matlab_plots/.DS_Store
+/code/.DS_Store
+.Rhistory
+/Matlab_plots/*.csv
+/Matlab_plots/*.nc
+/Matlab_plots/*.mat
